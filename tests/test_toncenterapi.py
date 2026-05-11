@@ -92,6 +92,47 @@ class ToncenterErrorClassificationTest(unittest.TestCase):
         self.assertIn("api_key=***MASKED***", str(raised.exception))
         self.assertNotIn("TEST_SECRET", str(raised.exception))
 
+    def test_broadcast_send_boc_return_hash_timeout_is_not_retried(self):
+        client = toncenterapi.Toncenterapi()
+
+        with patch.object(
+            toncenterapi.rq,
+            "request",
+            side_effect=toncenterapi.rq.Timeout("response lost after submit"),
+        ) as request:
+            with patch.object(toncenterapi, "sleep_before_retry"):
+                with self.assertRaises(toncenterapi.ToncenterTransientError):
+                    client.send_message_with_hash("SIGNED_BOC")
+
+        self.assertEqual(1, request.call_count)
+
+    def test_broadcast_send_boc_timeout_is_not_retried(self):
+        client = toncenterapi.Toncenterapi()
+
+        with patch.object(
+            toncenterapi.rq,
+            "request",
+            side_effect=toncenterapi.rq.Timeout("response lost after submit"),
+        ) as request:
+            with patch.object(toncenterapi, "sleep_before_retry"):
+                with self.assertRaises(toncenterapi.ToncenterTransientError):
+                    client.send_message("SIGNED_BOC")
+
+        self.assertEqual(1, request.call_count)
+
+    def test_response_error_message_masks_api_key_in_body(self):
+        response = FakeResponse(
+            status_code=500,
+            url="https://toncenter.com/api/v3/test?api_key=URL_SECRET",
+            text="proxy echoed https://toncenter.com/api/v3/test?api_key=BODY_SECRET",
+        )
+
+        message = toncenterapi._response_error_message("test", response)
+
+        self.assertIn("api_key=***MASKED***", message)
+        self.assertNotIn("URL_SECRET", message)
+        self.assertNotIn("BODY_SECRET", message)
+
 
 if __name__ == "__main__":
     unittest.main()

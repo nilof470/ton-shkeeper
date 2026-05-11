@@ -50,7 +50,7 @@ def sleep_before_retry(attempt):
 def _response_error_message(endpoint, response):
     safe_url = mask_toncenter_secret(getattr(response, 'url', ''))
     body = getattr(response, 'text', '') or ''
-    body = body[:300].replace('\n', ' ')
+    body = mask_toncenter_secret(body[:300].replace('\n', ' '))
     return f"Toncenter {endpoint} HTTP {response.status_code} for {safe_url}: {body}"
 
 
@@ -375,6 +375,7 @@ class Toncenterapi():
             headers={'accept': 'application/json',
                      'Content-Type': 'application/json'},
             params={'api_key': self.api_key},
+            retries=1,
         )
         logger.warning(f'Sent message to the blockchain, {response.text}')
         return response.status_code
@@ -388,6 +389,7 @@ class Toncenterapi():
             headers={'accept': 'application/json',
                      'Content-Type': 'application/json'},
             params={'api_key': self.api_key},
+            retries=1,
         )
         logger.warning(f'Sent message to the blockchain, {response.text}')
         result_json = response.json()
