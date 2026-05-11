@@ -1,6 +1,11 @@
 import os
 from decimal import Decimal
 
+
+def str_to_bool(value):
+    return str(value).lower() in ('1', 'true', 'yes', 'on')
+
+
 config = {
     'TONCENTER_API_URL': str(os.environ.get('TONCENTER_API_URL', 'https://api.testnet.ton.shkeeper.io:8082')),
     'TONCENTER_API_KEY': str(os.environ.get('TONCENTER_API_KEY', ' ')),
@@ -16,6 +21,7 @@ config = {
     'WORKCHAIN': str(os.environ.get('WORKCHAIN', '-1')), # -1 for masterchain
     'EVENTS_MAX_THREADS_NUMBER': int(os.environ.get('EVENTS_MAX_THREADS_NUMBER', '3')),
     'EVENTS_MIN_DIFF_TO_RUN_PARALLEL': int(os.environ.get('EVENTS_MIN_DIFF_TO_RUN_PARALLEL', '10')),
+    'SCAN_NATIVE_TON_EVENTS': str_to_bool(os.environ.get('SCAN_NATIVE_TON_EVENTS', 'true')),
     'FULLNODE_TIMEOUT': int(os.environ.get('FULLNODE_TIMEOUT', '60')),
     'CHECK_NEW_BLOCK_EVERY_SECONDS': int(os.environ.get('CHECK_NEW_BLOCK_EVERY_SECONDS', '2')),
     'CURRENT_TON_NETWORK': str(os.environ.get('CURRENT_TON_NETWORK','testnet')),
@@ -49,4 +55,3 @@ config = {
 
 def get_min_token_transfer_threshold(symbol):
     return config['TOKENS'][config['CURRENT_TON_NETWORK']][symbol].get('min_transfer_threshold', config['MIN_TOKEN_TRANSFER_THRESHOLD'])
-

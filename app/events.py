@@ -1,13 +1,52 @@
 import requests as rq
 import time
 import base64
+from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor
 
 from .models import Settings, db
 from .config import config
 from .logging import logger
 from .coin import get_all_raw_accounts, get_pub_address_by_raw_address
-from .toncenterapi import Toncenterapi
+from .toncenterapi import Toncenterapi, ToncenterTransientError
+
+
+SCAN_OK = "ok"
+SCAN_SKIPPED = "skipped"
+SCAN_TRANSIENT_FAILURE = "transient_failure"
+SCAN_PERMANENT_FAILURE = "permanent_failure"
+
+
+@dataclass
+class BlockScanResult:
+    block: int
+    native_ton: str = SCAN_OK
+    jettons: str = SCAN_OK
+    native_error: str = ""
+    jetton_error: str = ""
+
+    def can_advance_checkpoint(self):
+        if self.jettons != SCAN_OK:
+            return False
+        if config.get('SCAN_NATIVE_TON_EVENTS', True) and self.native_ton != SCAN_OK:
+            return False
+        return True
+
+    def summary(self):
+        details = f"block={self.block} native_ton={self.native_ton} jettons={self.jettons}"
+        if self.native_error:
+            details += f" native_error={self.native_error}"
+        if self.jetton_error:
+            details += f" jetton_error={self.jetton_error}"
+        return details
+
+
+def failed_scan_summary(results):
+    return "; ".join(
+        result.summary()
+        for result in results
+        if not result.can_advance_checkpoint()
+    )
 
 
 def walletnotify_shkeeper(symbol, txid) -> bool:
@@ -49,23 +88,39 @@ def log_loop(last_checked_block, check_interval):
             pass
         elif (last_block - last_checked_block) > int(config['EVENTS_MIN_DIFF_TO_RUN_PARALLEL']):
             def check_in_parallel(block):
-                try:
-                    ton_start_time = time.time()
-                    transactions = toncenterapi.get_all_transactions_by_masterchain_seqno(block)
-                    for transaction in transactions:
-                        if 'out_msgs' in transaction.keys():
-                            if len(transaction['out_msgs']) != 0:
-                                for message in transaction['out_msgs']:
-                                    if message['source'] != '' and message['destination'] != '':
-                                        if ((message['destination'] in list_accounts) or 
-                                            (message['source'] in list_accounts)):
-                                            walletnotify_shkeeper(config["COIN_SYMBOL"], base64.b64decode(transaction['hash']).hex())
-                                        if ((message['destination'] in list_accounts and message['source'] not in list_accounts) and 
-                                            ((toncenterapi.get_masterchain_head() - block) < 400)):
-                                            drain_account.delay(config["COIN_SYMBOL"], message['destination'])
-                    ton_finish_time = time.time()
+                result = BlockScanResult(block=block)
+                ton_start_time = time.time()
 
-                    # Jetton section
+                if config.get('SCAN_NATIVE_TON_EVENTS', True):
+                    try:
+                        transactions = toncenterapi.get_all_transactions_by_masterchain_seqno(block)
+                        for transaction in transactions:
+                            if 'out_msgs' in transaction.keys():
+                                if len(transaction['out_msgs']) != 0:
+                                    for message in transaction['out_msgs']:
+                                        if message['source'] != '' and message['destination'] != '':
+                                            if ((message['destination'] in list_accounts) or
+                                                (message['source'] in list_accounts)):
+                                                walletnotify_shkeeper(config["COIN_SYMBOL"], base64.b64decode(transaction['hash']).hex())
+                                            if ((message['destination'] in list_accounts and message['source'] not in list_accounts) and
+                                                ((toncenterapi.get_masterchain_head() - block) < 400)):
+                                                drain_account.delay(config["COIN_SYMBOL"], message['destination'])
+                    except ToncenterTransientError as e:
+                        result.native_ton = SCAN_TRANSIENT_FAILURE
+                        result.native_error = str(e)
+                        logger.warning(f'Block {block}: transient native TON scan failure: {e}')
+                        return result
+                    except Exception as e:
+                        result.native_ton = SCAN_PERMANENT_FAILURE
+                        result.native_error = str(e)
+                        logger.exception(f'Block {block}: native TON scan failed: {e}')
+                        return result
+                else:
+                    result.native_ton = SCAN_SKIPPED
+
+                ton_finish_time = time.time()
+
+                try:
                     for token in config['TOKENS'][config["CURRENT_TON_NETWORK"]].keys():
                         master_address = config['TOKENS'][config["CURRENT_TON_NETWORK"]][token]['master_address']
                         all_txs = toncenterapi.get_all_jetton_txs_by_masterchain_seqno(seqno=block, jetton_master=master_address)
@@ -78,15 +133,25 @@ def log_loop(last_checked_block, check_interval):
                                      transaction['source'] not in list_accounts) and 
                                     ((toncenterapi.get_masterchain_head() - block) < 400)):
                                     drain_account.delay(token, transaction['destination'])
-                   
-                    block_ton_time = ton_finish_time - ton_start_time
-                    block_jetton_time = time.time() - ton_finish_time
-                    logger.warning(f"Сhecked block {block}. TON time: {block_ton_time:.2f}, Jetton time: {block_jetton_time:.2f}")
-
+                except ToncenterTransientError as e:
+                    result.jettons = SCAN_TRANSIENT_FAILURE
+                    result.jetton_error = str(e)
+                    logger.warning(f'Block {block}: transient Jetton scan failure: {e}')
+                    return result
                 except Exception as e:
-                    logger.exception(f'Block {block}: Failed to scan: {e}')
-                    return False
-                return True
+                    result.jettons = SCAN_PERMANENT_FAILURE
+                    result.jetton_error = str(e)
+                    logger.exception(f'Block {block}: Jetton scan failed: {e}')
+                    return result
+
+                block_ton_time = ton_finish_time - ton_start_time
+                block_jetton_time = time.time() - ton_finish_time
+                logger.warning(
+                    f"Сhecked block {block}. TON status: {result.native_ton}, "
+                    f"TON time: {block_ton_time:.2f}, Jetton status: {result.jettons}, "
+                    f"Jetton time: {block_jetton_time:.2f}"
+                )
+                return result
             
             with ThreadPoolExecutor(max_workers=int(config['EVENTS_MAX_THREADS_NUMBER'])) as executor:
                  while True:
@@ -100,7 +165,7 @@ def log_loop(last_checked_block, check_interval):
                         results = list(executor.map(check_in_parallel, blocks))
                         logger.debug(f'Block chunk {blocks[0]} - {blocks[-1]} processed for {time.time() - start_time} seconds')
     
-                        if all(results):
+                        if all(result.can_advance_checkpoint() for result in results):
                             logger.debug(f"Commiting chunk {blocks[0]} - {blocks[-1]}")
                             last_checked_block = blocks[-1]
                             pd = Settings.query.filter_by(name = "last_block").first()
@@ -110,7 +175,10 @@ def log_loop(last_checked_block, check_interval):
                                 db.session.commit()
                                 db.session.close()
                         else:
-                            logger.info(f"Some blocks failed, retrying chunk {blocks[0]} - {blocks[-1]}")
+                            logger.info(
+                                f"Some blocks failed, retrying chunk {blocks[0]} - {blocks[-1]}: "
+                                f"{failed_scan_summary(results)}"
+                            )
 
                     except Exception as e:
                         sleep_sec = 60
@@ -151,5 +219,3 @@ def events_listener():
             logger.exception(f"Exception in main block scanner loop: {e}")
             logger.warning(f"Waiting {sleep_sec} seconds before retry.")           
             time.sleep(sleep_sec)
-
-
