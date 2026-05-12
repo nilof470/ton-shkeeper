@@ -56,34 +56,37 @@ def get_transaction(txid):
     if g.symbol == config["COIN_SYMBOL"]:
         try:
             transaction = toncenterapi.get_transaction_by_hash(txid)
-            if ((transaction['description']['aborted']) or
-                (transaction['description']['destroyed'])):
+            if transaction['description']['destroyed']:
                 logger.warning(f'Failed transaction {transaction}, return empty list')
                 return []
-            messages = transaction['out_msgs']
+            out_msgs = transaction['out_msgs']
+            if len(out_msgs) > 0:
+                logger.warning(f'Transaction {txid} has out messages, it will be ignored')
+                return []
+            message = transaction['in_msg']
             block = transaction['mc_block_seqno']
             confirmations = int(toncenterapi.get_masterchain_head()) - int(block)
             logger.warning(f'Confirmations - {str(confirmations)}')
-            for message in messages:
-                if message['bounced']:
-                    logger.warning(f'Message {message} in tx {txid} is bounced, so it will be ignored')
-                    continue
-                if message['decoded_opcode'] == 'jetton_notify':
-                    logger.warning(f'Message {message} in tx {txid} is jetton transfer notify, so it will be ignored')
-                    continue    
-                if (message['destination'] in list_accounts) and (message['source'] in list_accounts):
-                    address = get_pub_address_by_raw_address(message['source'])
-                    category = 'internal'
-                elif message['destination'] in list_accounts:
-                    address = get_pub_address_by_raw_address(message["destination"])
-                    category = 'receive'
-                elif message['source'] in list_accounts:                
-                    address = get_pub_address_by_raw_address(message['source'])
-                    category = 'send'
-                else:
-                    continue
-                amount = from_nanotons(int(message['value']))
-                related_transactions.append([address, amount, confirmations, category])
+            # for message in messages:
+            if message['bounced']:
+                logger.warning(f'Message {message} in tx {txid} is bounced, so it will be ignored')
+                return []
+            if message['decoded_opcode'] == 'jetton_notify':
+                logger.warning(f'Message {message} in tx {txid} is jetton transfer notify, so it will be ignored')
+                return []
+            if (message['destination'] in list_accounts) and (message['source'] in list_accounts):
+                address = get_pub_address_by_raw_address(message['source'])
+                category = 'internal'
+            elif message['destination'] in list_accounts:
+                address = get_pub_address_by_raw_address(message["destination"])
+                category = 'receive'
+            elif message['source'] in list_accounts:                
+                address = get_pub_address_by_raw_address(message['source'])
+                category = 'send'
+            else:
+                pass
+            amount = from_nanotons(int(message['value']))
+            related_transactions.append([address, amount, confirmations, category])
         except Exception as e:
             logger.warning(f"Error while checking transaction {txid} - {e}")
             return {'status': 'error', 'msg': {e}}

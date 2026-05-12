@@ -53,16 +53,15 @@ def log_loop(last_checked_block, check_interval):
                     ton_start_time = time.time()
                     transactions = toncenterapi.get_all_transactions_by_masterchain_seqno(block)
                     for transaction in transactions:
-                        if 'out_msgs' in transaction.keys():
-                            if len(transaction['out_msgs']) != 0:
-                                for message in transaction['out_msgs']:
-                                    if message['source'] != '' and message['destination'] != '':
-                                        if ((message['destination'] in list_accounts) or 
-                                            (message['source'] in list_accounts)):
-                                            walletnotify_shkeeper(config["COIN_SYMBOL"], base64.b64decode(transaction['hash']).hex())
-                                        if ((message['destination'] in list_accounts and message['source'] not in list_accounts) and 
-                                            ((toncenterapi.get_masterchain_head() - block) < 400)):
-                                            drain_account.delay(config["COIN_SYMBOL"], message['destination'])
+                        if 'in_msg' in transaction.keys() and transaction['in_msg'] is not None:
+                            message = transaction['in_msg']
+                            if message['source'] != '' and message['destination'] != '':
+                                if ((message['destination'] in list_accounts) or 
+                                    (message['source'] in list_accounts)):
+                                    walletnotify_shkeeper(config["COIN_SYMBOL"], base64.b64decode(transaction['hash']).hex())
+                                if ((message['destination'] in list_accounts and message['source'] not in list_accounts) and 
+                                    ((toncenterapi.get_masterchain_head() - block) < 400)):
+                                    drain_account.delay(config["COIN_SYMBOL"], message['destination'])
                     ton_finish_time = time.time()
 
                     # Jetton section
