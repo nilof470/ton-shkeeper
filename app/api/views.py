@@ -64,6 +64,9 @@ def get_transaction(txid):
                 logger.warning(f'Transaction {txid} has out messages, it will be ignored')
                 return []
             message = transaction['in_msg']
+            if message['value'] is None:
+                logger.warning(f'Transaction {txid} value is None, it will be ignored')
+                return []
             block = transaction['mc_block_seqno']
             confirmations = int(toncenterapi.get_masterchain_head()) - int(block)
             logger.warning(f'Confirmations - {str(confirmations)}')
