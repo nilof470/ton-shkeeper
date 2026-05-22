@@ -120,6 +120,33 @@ class ToncenterErrorClassificationTest(unittest.TestCase):
 
         self.assertEqual(1, request.call_count)
 
+    def test_transaction_by_hash_message_fallback_uses_adjacent_transactions_wrapper(self):
+        client = toncenterapi.Toncenterapi()
+        responses = [
+            FakeResponse(
+                status_code=200,
+                url="https://toncenter.com/api/v3/transactions",
+                payload={"transactions": []},
+            ),
+            FakeResponse(
+                status_code=200,
+                url="https://toncenter.com/api/v3/transactionsByMessage",
+                payload={"transactions": [{"hash": "MSG_HASH"}]},
+            ),
+            FakeResponse(
+                status_code=200,
+                url="https://toncenter.com/api/v3/adjacentTransactions",
+                payload={"transactions": [{"hash": "ADJACENT_HASH"}]},
+            ),
+        ]
+
+        with patch.object(toncenterapi.rq, "request", side_effect=responses) as request:
+            transaction = client.get_transaction_by_hash("ORIGINAL_HASH")
+
+        self.assertEqual({"hash": "ADJACENT_HASH"}, transaction)
+        self.assertEqual(3, request.call_count)
+        self.assertIn("adjacentTransactions", request.call_args.args[1])
+
     def test_response_error_message_masks_api_key_in_body(self):
         response = FakeResponse(
             status_code=500,

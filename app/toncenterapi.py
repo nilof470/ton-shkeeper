@@ -194,6 +194,7 @@ class Toncenterapi():
         if len(response.json()['transactions']) != 0:
             return response.json()['transactions'][0]
         else:
+            # payout transactions get transaction by message hash
             logger.warning(f"Cannot get transaction by hash {hash}, try to get transaction by message hash")
             response2 = toncenter_request(
                 'transactionsByMessage',
@@ -205,7 +206,17 @@ class Toncenterapi():
                 headers=self.headers,
             )
             if len(response2.json()['transactions']) > 0:
-                return response2.json()['transactions'][0]
+                response3 = toncenter_request(
+                    'adjacentTransactions',
+                    'GET',
+                    f'{self.indexer_url}/api/v3/adjacentTransactions',
+                    params={'api_key': self.indexer_key,
+                            'hash': response2.json()['transactions'][0]['hash'],
+                            },
+                    headers=self.headers,
+                )
+
+                return response3.json()['transactions'][0]
             else:
                 raise Exception (f"Cannot get transaction by hash {hash}")            
 

@@ -95,16 +95,16 @@ def log_loop(last_checked_block, check_interval):
                     try:
                         transactions = toncenterapi.get_all_transactions_by_masterchain_seqno(block)
                         for transaction in transactions:
-                            if 'out_msgs' in transaction.keys():
-                                if len(transaction['out_msgs']) != 0:
-                                    for message in transaction['out_msgs']:
-                                        if message['source'] != '' and message['destination'] != '':
-                                            if ((message['destination'] in list_accounts) or
-                                                (message['source'] in list_accounts)):
-                                                walletnotify_shkeeper(config["COIN_SYMBOL"], base64.b64decode(transaction['hash']).hex())
-                                            if ((message['destination'] in list_accounts and message['source'] not in list_accounts) and
-                                                ((toncenterapi.get_masterchain_head() - block) < 400)):
-                                                drain_account.delay(config["COIN_SYMBOL"], message['destination'])
+                            message = transaction.get('in_msg')
+                            if message is None:
+                                continue
+                            if message['source'] != '' and message['destination'] != '':
+                                if ((message['destination'] in list_accounts) or
+                                    (message['source'] in list_accounts)):
+                                    walletnotify_shkeeper(config["COIN_SYMBOL"], base64.b64decode(transaction['hash']).hex())
+                                if ((message['destination'] in list_accounts and message['source'] not in list_accounts) and
+                                    ((toncenterapi.get_masterchain_head() - block) < 400)):
+                                    drain_account.delay(config["COIN_SYMBOL"], message['destination'])
                     except ToncenterTransientError as e:
                         result.native_ton = SCAN_TRANSIENT_FAILURE
                         result.native_error = str(e)
