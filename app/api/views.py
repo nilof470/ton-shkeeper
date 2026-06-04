@@ -7,11 +7,6 @@ from ..coin import Coin, get_all_accounts, get_all_raw_accounts, get_pub_address
 from ..toncenterapi import Toncenterapi, from_nanotons
 from ..logging import logger
 from . import api
-from app import create_app
-
-
-app = create_app()
-app.app_context().push()
 
 
 @api.post("/generate-address")
@@ -39,8 +34,7 @@ def get_balance():
 @api.post('/status')
 def get_status():
     toncenterapi = Toncenterapi()
-    with app.app_context():
-        pd = Settings.query.filter_by(name = 'last_block').first()
+    pd = Settings.query.filter_by(name = 'last_block').first()
     
     last_checked_block_number = int(pd.value)
     timestamp = toncenterapi.get_block_timestamp(last_checked_block_number)

@@ -1,4 +1,5 @@
 import os
+import json
 from decimal import Decimal
 
 
@@ -51,6 +52,24 @@ config = {
     'MIN_TRANSFER_THRESHOLD': Decimal(os.environ.get('MIN_TRANSFER_THRESHOLD', '0.2')),
     'MIN_TOKEN_TRANSFER_THRESHOLD': Decimal(os.environ.get('MIN_TOKEN_TRANSFER_THRESHOLD', '0.5')), 
     'LAST_BLOCK_LOCKED': os.environ.get('LAST_BLOCK_LOCKED'),
+    'PAYOUT_CONSUMER_KEYS': json.loads(os.environ.get('PAYOUT_CONSUMER_KEYS_JSON', '{}') or '{}'),
+    'PAYOUT_AUTH_MAX_AGE_SECONDS': int(os.environ.get('PAYOUT_AUTH_MAX_AGE_SECONDS', '300')),
+    'PAYOUT_EXECUTION_PREFLIGHT_CHECKS_ENABLED': str_to_bool(os.environ.get('PAYOUT_EXECUTION_PREFLIGHT_CHECKS_ENABLED', 'true')),
+    'PAYOUT_EXECUTION_AUTO_ENQUEUE_ENABLED': str_to_bool(os.environ.get('PAYOUT_EXECUTION_AUTO_ENQUEUE_ENABLED', 'false')),
+    'PAYOUT_EXECUTION_LEASE_TTL_SEC': int(os.environ.get('PAYOUT_EXECUTION_LEASE_TTL_SEC', '300')),
+    'TON_USDT_PAYOUT_QUEUE': os.environ.get('TON_USDT_PAYOUT_QUEUE', 'ton_usdt_payouts'),
+    'TON_USDT_PAYOUT_QUEUE_READINESS_TIMEOUT_SEC': float(os.environ.get('TON_USDT_PAYOUT_QUEUE_READINESS_TIMEOUT_SEC', '2.0')),
+    'TON_USDT_PAYOUT_VALID_UNTIL_CAP_SEC': int(os.environ.get('TON_USDT_PAYOUT_VALID_UNTIL_CAP_SEC', '60')),
+    'TON_USDT_PAYOUT_MIN_CONFIRMATIONS': int(os.environ.get('TON_USDT_PAYOUT_MIN_CONFIRMATIONS', '1')),
+    'TON_USDT_PAYOUT_SEQNO_LOCK_TTL_SEC': int(os.environ.get('TON_USDT_PAYOUT_SEQNO_LOCK_TTL_SEC', '300')),
+    'TON_USDT_PAYOUT_SEQNO_LOCK_WAIT_SEC': int(os.environ.get('TON_USDT_PAYOUT_SEQNO_LOCK_WAIT_SEC', '300')),
+    'PAYOUT_CALLBACK_MAX_ATTEMPTS': int(os.environ.get('PAYOUT_CALLBACK_MAX_ATTEMPTS', '3')),
+    'PAYOUT_CALLBACK_RETRY_DELAY_SEC': int(os.environ.get('PAYOUT_CALLBACK_RETRY_DELAY_SEC', '60')),
+    'PAYOUT_CALLBACK_TIMEOUT_SEC': int(os.environ.get('PAYOUT_CALLBACK_TIMEOUT_SEC', '10')),
+    'PAYOUT_CALLBACK_SWEEP_ENABLED': str_to_bool(os.environ.get('PAYOUT_CALLBACK_SWEEP_ENABLED', 'true')),
+    'PAYOUT_CALLBACK_SWEEP_PERIOD_SEC': int(os.environ.get('PAYOUT_CALLBACK_SWEEP_PERIOD_SEC', '60')),
+    'PAYOUT_CALLBACK_SWEEP_LIMIT': int(os.environ.get('PAYOUT_CALLBACK_SWEEP_LIMIT', '100')),
+    'PAYOUT_CALLBACK_CLAIM_TTL_SEC': int(os.environ.get('PAYOUT_CALLBACK_CLAIM_TTL_SEC', '300')),
 }
 
 def get_min_token_transfer_threshold(symbol):

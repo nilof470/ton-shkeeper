@@ -2,7 +2,8 @@
 import decimal
 import time
 import copy
-import requests
+from contextlib import contextmanager
+import uuid
 
 from celery.utils.log import get_task_logger
 
@@ -10,9 +11,22 @@ from . import celery
 from .config import config, get_min_token_transfer_threshold
 from .models import Accounts, db
 from .coin import Coin, get_all_accounts
+from .fee_deposit_seqno_guard import fee_deposit_seqno_lock
+from .payout_callback_outbox import (
+    claim_due_payout_callbacks,
+    create_payout_callback,
+    dispatch_payout_callback,
+    should_retry,
+)
 from .utils import skip_if_running
 
 logger = get_task_logger(__name__)
+
+
+@contextmanager
+def ton_usdt_payout_seqno_lock():
+    with fee_deposit_seqno_lock(reason="ton-usdt-payout"):
+        yield
 
 
 @celery.task()
@@ -20,29 +34,78 @@ def make_multipayout(symbol, payout_list, fee):
     if symbol == config["COIN_SYMBOL"]:
         coint_inst = Coin(symbol)
         payout_results = coint_inst.make_multipayout_ton(payout_list, fee)
-        post_payout_results.delay(payout_results, symbol)
-        return payout_results    
+        queue_payout_callback(payout_results, symbol)
+        return payout_results
     elif symbol in config['TOKENS'][config["CURRENT_TON_NETWORK"]].keys():
         token_inst = Coin(symbol)
         payout_results = token_inst.make_multipayout_jetton(payout_list, fee)
-        post_payout_results.delay(payout_results, symbol)
-        return payout_results    
+        queue_payout_callback(payout_results, symbol)
+        return payout_results
     else:
         return [{"status": "error", 'msg': "Symbol is not in config"}]
 
 
-@celery.task()
-def post_payout_results(data, symbol):
-    while True:
-        try:
-            return requests.post(
-                f'http://{config["SHKEEPER_HOST"]}/api/v1/payoutnotify/{symbol}',
-                headers={'X-Shkeeper-Backend-Key': config['SHKEEPER_KEY']},
-                json=data,
-            )
-        except Exception as e:
-            logger.exception(f'Shkeeper payout notification failed: {e}')
-            time.sleep(10)
+@celery.task(bind=True)
+def execute_payout_execution(self, execution_id):
+    from .payout_execution import PayoutExecutionStore
+
+    coin = Coin("TON-USDT")
+    return PayoutExecutionStore.execute(
+        execution_id,
+        coin=coin,
+        lock_factory=ton_usdt_payout_seqno_lock,
+        lease_owner=self.request.id,
+    )
+
+
+def queue_payout_callback(data, symbol):
+    try:
+        outbox_id = create_payout_callback(data, symbol)
+    except Exception as exc:
+        logger.exception(
+            "Shkeeper payout notification outbox write failed after payout "
+            f"completed: symbol={symbol} error={exc}"
+        )
+        return None
+    try:
+        post_payout_results.delay(outbox_id)
+    except Exception as exc:
+        logger.warning(
+            "Shkeeper payout notification task enqueue failed; outbox row "
+            f"remains pending: outbox_id={outbox_id} error={exc}"
+        )
+    return outbox_id
+
+
+@celery.task(bind=True)
+def post_payout_results(self, outbox_id):
+    result = dispatch_payout_callback(outbox_id, claim_token=self.request.id)
+    if should_retry(result):
+        logger.warning(
+            "Shkeeper payout notification failed; outbox retry remains pending: "
+            f"outbox_id={outbox_id} attempts={result['attempts']} "
+            f"error={result['last_error']} next_attempt_at={result['next_attempt_at']}"
+        )
+    elif result and result.get("status") == "FAILED":
+        logger.warning(
+            "Shkeeper payout notification permanently failed: "
+            f"outbox_id={outbox_id} attempts={result.get('attempts')} "
+            f"error={result.get('last_error')}"
+        )
+    return result
+
+
+@celery.task(bind=True)
+def dispatch_due_payout_callbacks(self, limit=None):
+    claim_token = self.request.id or f"payout-callback-sweep-{uuid.uuid4()}"
+    rows = claim_due_payout_callbacks(
+        limit or config["PAYOUT_CALLBACK_SWEEP_LIMIT"],
+        claim_token=claim_token,
+    )
+    results = []
+    for row in rows:
+        results.append(dispatch_payout_callback(row["id"], claim_token=claim_token))
+    return results
 
 
 @celery.task()
@@ -64,37 +127,37 @@ def refresh_balances():
             coin_inst = Coin()
             acc_balance = coin_inst.get_ton_balance(account)
             if Accounts.query.filter_by(pub_address = account, crypto = config["COIN_SYMBOL"]).first():
-                pd = Accounts.query.filter_by(pub_address = account, crypto = config["COIN_SYMBOL"]).first()            
-                pd.amount = acc_balance                  
+                pd = Accounts.query.filter_by(pub_address = account, crypto = config["COIN_SYMBOL"]).first()
+                pd.amount = acc_balance
                 with app.app_context():
                     db.session.add(pd)
                     db.session.commit()
                     db.session.close()
-            
+
             have_tokens = False
-            
+
             for token in config['TOKENS'][config["CURRENT_TON_NETWORK"]].keys():
                 token_inst = Coin(token)
                 if Accounts.query.filter_by(pub_address = account, crypto = token).first():
                     pd = Accounts.query.filter_by(pub_address = account, crypto = token).first()
                     balance = decimal.Decimal(token_inst.get_account_jetton_balance(account))
                     pd.amount = balance
-                    
+
                     with app.app_context():
                         db.session.add(pd)
-                        db.session.commit() 
-                        db.session.close()  
+                        db.session.commit()
+                        db.session.close()
                     if balance >= decimal.Decimal(get_min_token_transfer_threshold(token)):
                         have_tokens = copy.deepcopy(token)
-                    
+
             if have_tokens in config['TOKENS'][config["CURRENT_TON_NETWORK"]].keys():
-                drain_account.delay(have_tokens, account) 
+                drain_account.delay(have_tokens, account)
             else:
                 if acc_balance >= decimal.Decimal(config['MIN_TRANSFER_THRESHOLD']):
-                    drain_account.delay(config["COIN_SYMBOL"], account)        
-    
-            updated = updated + 1                
-    
+                    drain_account.delay(config["COIN_SYMBOL"], account)
+
+            updated = updated + 1
+
             with app.app_context():
                 db.session.add(pd)
                 db.session.commit()
@@ -106,8 +169,8 @@ def refresh_balances():
 
         with app.app_context():
             db.session.remove()
-            db.engine.dispose()  
- 
+            db.engine.dispose()
+
     return updated
 
 
@@ -126,7 +189,7 @@ def drain_account(self, symbol, account):
         results = inst.drain_account(account, destination)
     else:
         raise Exception("Symbol is not in config")
-    
+
     return results
 
 
@@ -135,10 +198,15 @@ def drain_account(self, symbol, account):
 def create_fee_deposit_account(self):
     logger.warning("Creating fee-deposit account")
     inst = Coin(config["COIN_SYMBOL"])
-    inst.set_fee_deposit_account()    
+    inst.set_fee_deposit_account()
     return True
-        
+
 
 @celery.on_after_configure.connect
 def setup_periodic_tasks(sender, **kwargs):
+    if config["PAYOUT_CALLBACK_SWEEP_ENABLED"]:
+        sender.add_periodic_task(
+            int(config["PAYOUT_CALLBACK_SWEEP_PERIOD_SEC"]),
+            dispatch_due_payout_callbacks.s(),
+        )
     sender.add_periodic_task(int(config['UPDATE_TOKEN_BALANCES_EVERY_SECONDS']), refresh_balances.s())

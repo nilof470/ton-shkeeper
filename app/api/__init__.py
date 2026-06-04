@@ -11,6 +11,14 @@ metrics_blueprint = Blueprint('metrics_blueprint', __name__, url_prefix='/')
 @metrics_blueprint.before_request
 @api.before_request
 def check_credentials():
+    path = request.path
+    if (
+        path.endswith("/payout/preflight")
+        or path.endswith("/payout/submit")
+        or "/payout/status/" in path
+        or "/payout-executions/" in path
+    ):
+        return None
     auth = request.authorization
     if not (auth and auth.username == config['API_USERNAME']
                  and auth.password == config['API_PASSWORD']):
@@ -35,5 +43,4 @@ def handle_exception(e):
     return {"status": "error", "msg": str(e)}
 
 from . import payout, views, metrics
-
 

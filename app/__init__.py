@@ -1,5 +1,6 @@
 from celery import Celery
 from flask import Flask
+from sqlalchemy.pool import NullPool
 # import flask_sqlalchemy
 
 
@@ -24,6 +25,16 @@ def create_app():
 
     app = Flask(__name__)
     app.config.from_mapping(config)
+    app.config.setdefault("SQLALCHEMY_TRACK_MODIFICATIONS", False)
+    if not str(app.config["SQLALCHEMY_DATABASE_URI"]).startswith("sqlite"):
+        app.config.setdefault(
+            "SQLALCHEMY_ENGINE_OPTIONS",
+            {
+                "connect_args": {"connect_timeout": 60},
+                "isolation_level": "READ COMMITTED",
+                "poolclass": NullPool,
+            },
+        )
 
     from . import utils
     # utils.init_wallet(app)
@@ -41,7 +52,7 @@ def create_app():
     with app.app_context():
 
         # Create tables according to models
-        from .models import Settings
+        from . import models
         db.create_all()
     
 
