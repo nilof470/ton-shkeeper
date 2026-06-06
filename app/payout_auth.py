@@ -51,19 +51,39 @@ def _consumer_config(consumer):
     return consumers.get(consumer) or {}
 
 
-def _secret_for(consumer, key_id):
+def _key_config_for(consumer, key_id):
     consumer_config = _consumer_config(consumer)
     keys = consumer_config.get("keys") if isinstance(consumer_config, dict) else None
     if isinstance(keys, dict) and key_id in keys:
-        return str(keys[key_id])
+        return {
+            "secret": str(keys[key_id]),
+            "rails": consumer_config.get("rails"),
+        }
     if consumer_config.get("key_id") == key_id and consumer_config.get("secret"):
-        return str(consumer_config["secret"])
+        return {
+            "secret": str(consumer_config["secret"]),
+            "rails": consumer_config.get("rails"),
+        }
+    key_config = consumer_config.get(key_id) if isinstance(consumer_config, dict) else None
+    if isinstance(key_config, str):
+        return {"secret": key_config}
+    if isinstance(key_config, dict) and key_config.get("secret"):
+        return key_config
     return None
 
 
-def _rail_allowed(consumer, rail):
-    consumer_config = _consumer_config(consumer)
-    rails = consumer_config.get("rails") if isinstance(consumer_config, dict) else None
+def _secret_for(consumer, key_id):
+    key_config = _key_config_for(consumer, key_id)
+    if not key_config:
+        return None
+    return str(key_config["secret"])
+
+
+def _rail_allowed(consumer, key_id, rail):
+    key_config = _key_config_for(consumer, key_id)
+    if not key_config:
+        return False
+    rails = key_config.get("rails") or key_config.get("allowed_rails")
     return rails is None or rail in rails
 
 
@@ -102,12 +122,11 @@ def verify_payout_request(headers, body_bytes, *, method, path, query, rail):
 
     if abs(int(time.time()) - timestamp_int) > int(config["PAYOUT_AUTH_MAX_AGE_SECONDS"]):
         raise PayoutAuthError("Payout auth timestamp is outside tolerance", code="PAYOUT_AUTH_TIMESTAMP")
-    if not _rail_allowed(consumer, rail):
-        raise PayoutAuthError("Consumer is not authorized for this rail", code="PAYOUT_CONSUMER_FORBIDDEN", status_code=403)
-
     secret = _secret_for(consumer, key_id)
     if not secret:
         raise PayoutAuthError("Unknown payout auth key", code="PAYOUT_AUTH_UNKNOWN_KEY")
+    if not _rail_allowed(consumer, key_id, rail):
+        raise PayoutAuthError("Consumer is not authorized for this rail", code="PAYOUT_CONSUMER_FORBIDDEN", status_code=403)
 
     expected = hmac.new(
         secret.encode("utf-8"),

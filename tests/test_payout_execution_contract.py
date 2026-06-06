@@ -174,6 +174,27 @@ class TonPayoutExecutionContractTests(unittest.TestCase):
         self.assertEqual(data["external_id"], "WD-1")
         self.assertEqual(data["payout_queue"], "ton_usdt_payouts")
 
+    def test_preflight_accepts_canonical_nested_consumer_key(self):
+        from app.config import config
+
+        config["PAYOUT_CONSUMER_KEYS"] = {
+            CONSUMER: {
+                KEY_ID: {
+                    "secret": SECRET,
+                    "rails": ["TON-USDT"],
+                }
+            }
+        }
+
+        response = self.post_json(
+            "/TON-USDT/payout/preflight",
+            payload(),
+            nonce="nested-key",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["state"], "PREFLIGHT_OK")
+
     def test_submit_creates_execution_and_status_schema(self):
         submit = self.post_json("/TON-USDT/payout/submit", payload())
 
