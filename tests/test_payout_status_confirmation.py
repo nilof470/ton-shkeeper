@@ -71,6 +71,12 @@ class FakeStatusCoin:
     def __init__(self, toncenter):
         self.toncenter = toncenter
 
+    def get_fee_deposit_account(self, address_type):
+        return {
+            "raw": "0:fee-deposit-owner",
+            "public": "EQFEEDEPOSIT",
+        }[address_type]
+
 
 class TonPayoutStatusConfirmationTests(unittest.TestCase):
     def setUp(self):
@@ -249,6 +255,36 @@ class TonPayoutStatusConfirmationTests(unittest.TestCase):
         self.assertTrue(status["chain_check_metadata"]["transfer_match"])
         self.assertGreaterEqual(status["chain_check_metadata"]["confirmations"], 1)
         self.assertEqual(status["message_hashes"], ["message-hash-100"])
+
+    def test_status_confirms_raw_toncenter_jetton_transfer_fields(self):
+        from tonsdk.utils import Address
+
+        destination_raw = "0:" + Address(DESTINATION).hash_part.hex().upper()
+        jetton_master_raw = "0:" + Address(
+            "kQDXn-tVCycUFu1PrKI9R-hnk9lP6MxqSEbUjkWtkcmuWdvu"
+        ).hash_part.hex().upper()
+        self.create_broadcasted_execution(jetton_wallet="0:jetton-wallet")
+        transfer = {
+            "source": "0:fee-deposit-owner",
+            "destination": destination_raw,
+            "amount": "12345678",
+            "jetton_master": jetton_master_raw,
+            "transaction_hash": "generic-message-tx",
+        }
+        coin = FakeStatusCoin(FakeStatusToncenter(transfer=transfer, decimals=6))
+
+        with self.app.app_context():
+            status = self.store_module.PayoutExecutionStore.status(
+                self.execution_id,
+                authenticated_consumer=CONSUMER,
+                endpoint_symbol="TON-USDT",
+                coin=coin,
+            )
+
+        self.assertEqual(status["state"], "CONFIRMED")
+        self.assertTrue(status["chain_check_metadata"]["transfer_match"])
+        self.assertEqual("0:fee-deposit-owner", status["chain_check_metadata"]["source"])
+        self.assertEqual(destination_raw, status["chain_check_metadata"]["destination"])
 
     def test_matching_jetton_transfer_waits_for_min_confirmations(self):
         from app.config import config

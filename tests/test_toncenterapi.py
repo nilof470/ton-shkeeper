@@ -128,6 +128,45 @@ class ToncenterErrorClassificationTest(unittest.TestCase):
 
         self.assertEqual(message_hash, result)
 
+    def test_jetton_transaction_by_hash_matches_adjacent_transaction_hash(self):
+        message_hash = "2e" * 32
+        transaction_hash = base64.b64encode(bytes.fromhex("46" * 32)).decode()
+        responses = [
+            FakeResponse(
+                status_code=200,
+                url="https://toncenter.com/api/v3/transactions",
+                payload={"transactions": []},
+            ),
+            FakeResponse(
+                status_code=200,
+                url="https://toncenter.com/api/v3/transactionsByMessage",
+                payload={"transactions": [{"hash": transaction_hash}]},
+            ),
+            FakeResponse(
+                status_code=200,
+                url="https://toncenter.com/api/v3/adjacentTransactions",
+                payload={"transactions": [{"hash": transaction_hash, "lt": "100"}]},
+            ),
+            FakeResponse(
+                status_code=200,
+                url="https://toncenter.com/api/v3/jetton/transfers",
+                payload={
+                    "jetton_transfers": [
+                        {
+                            "transaction_hash": transaction_hash,
+                            "trace_id": "different-trace",
+                        },
+                    ],
+                },
+            ),
+        ]
+        client = toncenterapi.Toncenterapi()
+
+        with patch.object(toncenterapi.rq, "request", side_effect=responses):
+            transfer = client.get_jetton_transaction_by_hash(message_hash, "JETTON")
+
+        self.assertEqual(transaction_hash, transfer["transaction_hash"])
+
     def test_broadcast_send_boc_timeout_is_not_retried(self):
         client = toncenterapi.Toncenterapi()
 

@@ -225,14 +225,19 @@ class Toncenterapi():
         tx_lt = int(tx_by_hash['lt'])
         logger.warning(f"transaction lt - {tx_lt}")
         tx_list = self.get_all_jetton_txs_by_masterchain_seqno(start_lt=tx_lt-3, end_lt=tx_lt+3, jetton_master=jetton_master)
+        tx_hash = tx_by_hash.get('hash')
+        tx_trace_id = tx_by_hash.get('trace_id')
 
         for tx in tx_list:
             if base64.b64decode(tx['transaction_hash']).hex() == hash:
                 return tx
+            if tx_hash and tx.get('transaction_hash') == tx_hash:
+                return tx
         logger.warning(f"Cannot get jetton transaction by hash {hash}, probably it is outgoing tx, try to get transaction by message hash")
-        message_hash = tx_by_hash['hash']
         for tx in tx_list:
-            if (tx['trace_id']) == message_hash:
+            if tx_hash and tx.get('trace_id') == tx_hash:
+                return tx
+            if tx_trace_id and tx.get('trace_id') == tx_trace_id:
                 return tx
         raise Exception (f"Cannot get jetton transaction by hash {hash}")
             

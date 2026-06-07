@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from decimal import Decimal, InvalidOperation
 
+from tonsdk.utils import Address
+
 from . import celery
 from .coin import Coin, is_valid_ton_address
 from .config import config
@@ -104,6 +106,29 @@ def _raw_jetton_amount_to_decimal(raw_amount, decimals):
         ) from exc
 
 
+def _normalize_ton_address(address):
+    if not address:
+        return None
+    try:
+        parsed = Address(str(address))
+        return f"{parsed.wc}:{parsed.hash_part.hex().upper()}"
+    except Exception:
+        return str(address)
+
+
+def _expected_transfer_sources(row, coin):
+    sources = {_normalize_ton_address(row.jetton_wallet)}
+    try:
+        sources.add(_normalize_ton_address(coin.get_fee_deposit_account("raw")))
+    except Exception:
+        pass
+    try:
+        sources.add(_normalize_ton_address(coin.get_fee_deposit_account("public")))
+    except Exception:
+        pass
+    return {source for source in sources if source}
+
+
 def _matches_transfer(row, transfer, coin):
     canonical = json.loads(row.canonical_payload_json)
     decimals = coin.toncenter.jetton_master_decimals(row.jetton_master)
@@ -115,20 +140,32 @@ def _matches_transfer(row, transfer, coin):
     source = _transfer_field(transfer, "source", "sender", "from")
     destination = _transfer_field(transfer, "destination", "recipient", "to")
     jetton_master = _transfer_field(transfer, "jetton_master", "jetton")
+    normalized_source = _normalize_ton_address(source)
+    normalized_destination = _normalize_ton_address(destination)
+    normalized_jetton_master = _normalize_ton_address(jetton_master)
+    expected_sources = _expected_transfer_sources(row, coin)
+    expected_destination = _normalize_ton_address(canonical["destination"])
+    expected_jetton_master = _normalize_ton_address(row.jetton_master)
     return {
         "amount": str(amount),
         "expected_amount": str(expected_amount),
         "source": source,
+        "normalized_source": normalized_source,
         "expected_source": row.jetton_wallet,
+        "expected_sources": sorted(expected_sources),
         "destination": destination,
         "expected_destination": canonical["destination"],
+        "normalized_destination": normalized_destination,
+        "normalized_expected_destination": expected_destination,
         "jetton_master": jetton_master,
         "expected_jetton_master": row.jetton_master,
+        "normalized_jetton_master": normalized_jetton_master,
+        "normalized_expected_jetton_master": expected_jetton_master,
         "transfer_match": (
             amount == expected_amount
-            and source == row.jetton_wallet
-            and destination == canonical["destination"]
-            and jetton_master == row.jetton_master
+            and normalized_source in expected_sources
+            and normalized_destination == expected_destination
+            and normalized_jetton_master == expected_jetton_master
             and row.chain_id_or_network_id == "TON"
         ),
     }
