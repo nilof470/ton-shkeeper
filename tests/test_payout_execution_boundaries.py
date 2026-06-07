@@ -695,6 +695,21 @@ class TonPayoutCoinPrimitiveTests(unittest.TestCase):
         result = coin.broadcast_signed_payout(signed)
         self.assertEqual(result["hash"], "11" * 32)
 
+    def test_coin_accepts_hex_broadcast_hash_without_base64_decoding(self):
+        from app.coin import Coin
+
+        class FakeToncenterForCoin:
+            def send_message_with_hash(self, _boc):
+                return "22" * 32
+
+        coin = Coin("TON-USDT")
+        coin.toncenter = FakeToncenterForCoin()
+
+        result = coin.broadcast_signed_payout({"boc": "signed-boc"})
+
+        self.assertEqual(result["hash"], "22" * 32)
+        self.assertEqual(result["hash_base64"], "22" * 32)
+
 
 
 if __name__ == "__main__":

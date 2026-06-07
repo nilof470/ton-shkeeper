@@ -90,6 +90,18 @@ def is_valid_ton_address(address: str) -> bool:
 
 
 class Coin:
+    @staticmethod
+    def _normalize_broadcast_hash(response_hash):
+        text = str(response_hash).strip()
+        if len(text) == 64 and all(c in "0123456789abcdefABCDEF" for c in text):
+            return text.lower()
+        try:
+            decoded = base64.b64decode(text, validate=True)
+            if len(decoded) == 32:
+                return decoded.hex()
+        except Exception:
+            pass
+        return text
 
     def __init__(self, symbol=config['COIN_SYMBOL'], init=True):
         self.symbol = symbol
@@ -232,10 +244,7 @@ class Coin:
 
     def broadcast_signed_payout(self, signed):
         response_hash = self.toncenter.send_message_with_hash(signed['boc'])
-        try:
-            message_hash = base64.b64decode(response_hash).hex()
-        except Exception:
-            message_hash = str(response_hash)
+        message_hash = self._normalize_broadcast_hash(response_hash)
         return {
             'ok': True,
             'hash': message_hash,
