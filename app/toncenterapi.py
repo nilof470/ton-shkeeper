@@ -405,7 +405,7 @@ class Toncenterapi():
         logger.warning(f'Sent message to the blockchain, {response.text}')
         result_json = response.json()
         if result_json['ok']:
-            tx_id = result_json['result']['hash_norm']
+            tx_id = result_json['result'].get('hash') or result_json['result']['hash_norm']
             return tx_id
         else:
             return False

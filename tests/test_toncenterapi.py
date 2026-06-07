@@ -1,4 +1,5 @@
 import unittest
+import base64
 from unittest.mock import patch
 
 from app import toncenterapi
@@ -105,6 +106,27 @@ class ToncenterErrorClassificationTest(unittest.TestCase):
                     client.send_message_with_hash("SIGNED_BOC")
 
         self.assertEqual(1, request.call_count)
+
+    def test_send_message_with_hash_prefers_signed_message_hash_field(self):
+        message_hash = base64.b64encode(bytes.fromhex("64" * 32)).decode()
+        normalized_hash = base64.b64encode(bytes.fromhex("c1" * 32)).decode()
+        response = FakeResponse(
+            status_code=200,
+            url="https://toncenter.com/api/v2/sendBocReturnHash",
+            payload={
+                "ok": True,
+                "result": {
+                    "hash": message_hash,
+                    "hash_norm": normalized_hash,
+                },
+            },
+        )
+        client = toncenterapi.Toncenterapi()
+
+        with patch.object(toncenterapi.rq, "request", return_value=response):
+            result = client.send_message_with_hash("SIGNED_BOC")
+
+        self.assertEqual(message_hash, result)
 
     def test_broadcast_send_boc_timeout_is_not_retried(self):
         client = toncenterapi.Toncenterapi()
