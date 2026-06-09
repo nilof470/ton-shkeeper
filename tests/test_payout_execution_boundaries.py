@@ -125,6 +125,7 @@ class TonPayoutExecutionBoundaryTests(unittest.TestCase):
         config["TON_USDT_PAYOUT_QUEUE"] = "ton_usdt_payouts"
         config["PAYOUT_EXECUTION_PREFLIGHT_CHECKS_ENABLED"] = False
         config["PAYOUT_EXECUTION_AUTO_ENQUEUE_ENABLED"] = False
+        config["PAYOUT_EXECUTION_ORPHAN_RECOVERY_MIN_AGE_SEC"] = 60
         config["PAYOUT_EXECUTION_LEASE_TTL_SEC"] = 300
         config["TON_USDT_PAYOUT_VALID_UNTIL_CAP_SEC"] = 60
         reset_modules()
@@ -631,6 +632,240 @@ class TonPayoutExecutionBoundaryTests(unittest.TestCase):
 
         self.assertEqual(first["execution_id"], second["execution_id"])
         self.assertEqual(calls, [(self.execution_id, "ton_usdt_payouts")])
+
+    def test_task_owned_transient_failure_retries_received_without_mutation(self):
+        self.create_execution()
+
+        with self.app.app_context():
+            action = self.store_module.PayoutExecutionStore.recover_task_owned_transient_failure(
+                self.execution_id,
+                lease_owner="task-1",
+            )
+
+        row = self.get_execution()
+        self.assertEqual(action, "retry")
+        self.assertEqual(row.state, "RECEIVED")
+        self.assertIsNone(row.lease_owner)
+        self.assertIsNone(row.attempt_id)
+        self.assertFalse(row.reconciliation_required)
+
+    def test_task_owned_transient_failure_resets_signing_without_unsafe_evidence(self):
+        self.create_execution()
+        self.set_execution_fields(
+            state="SIGNING",
+            lease_owner="task-1",
+            lease_expires_at="2999-01-01T00:00:00.000000Z",
+            attempt_id="attempt-1",
+        )
+
+        with self.app.app_context():
+            action = self.store_module.PayoutExecutionStore.recover_task_owned_transient_failure(
+                self.execution_id,
+                lease_owner="task-1",
+            )
+
+        row = self.get_execution()
+        self.assertEqual(action, "retry")
+        self.assertEqual(row.state, "RECEIVED")
+        self.assertIsNone(row.lease_owner)
+        self.assertIsNone(row.lease_expires_at)
+        self.assertIsNone(row.attempt_id)
+        self.assertFalse(row.reconciliation_required)
+
+    def test_task_owned_transient_failure_does_not_retry_signing_with_seqno(self):
+        self.create_execution()
+        self.set_execution_fields(
+            state="SIGNING",
+            lease_owner="task-1",
+            lease_expires_at="2999-01-01T00:00:00.000000Z",
+            attempt_id="attempt-1",
+            source_seqno=101,
+        )
+
+        with self.app.app_context():
+            action = self.store_module.PayoutExecutionStore.recover_task_owned_transient_failure(
+                self.execution_id,
+                lease_owner="task-1",
+            )
+
+        row = self.get_execution()
+        self.assertEqual(action, "raise")
+        self.assertEqual(row.state, "SIGNING")
+        self.assertEqual(row.source_seqno, 101)
+        self.assertEqual(row.lease_owner, "task-1")
+
+    def test_task_owned_transient_failure_does_not_steal_other_worker_signing(self):
+        self.create_execution()
+        self.set_execution_fields(
+            state="SIGNING",
+            lease_owner="task-other",
+            lease_expires_at="2999-01-01T00:00:00.000000Z",
+            attempt_id="attempt-other",
+        )
+
+        with self.app.app_context():
+            action = self.store_module.PayoutExecutionStore.recover_task_owned_transient_failure(
+                self.execution_id,
+                lease_owner="task-1",
+            )
+
+        row = self.get_execution()
+        self.assertEqual(action, "raise")
+        self.assertEqual(row.state, "SIGNING")
+        self.assertEqual(row.lease_owner, "task-other")
+        self.assertEqual(row.attempt_id, "attempt-other")
+
+    def test_status_is_read_only_for_received_orphan(self):
+        self.create_execution()
+        self.set_execution_fields(state_updated_at="2026-01-01T00:00:00.000000Z")
+        store = self.store_module.PayoutExecutionStore
+
+        with self.app.app_context():
+            with patch.object(store, "enqueue_execution") as enqueue:
+                status = store.status(
+                    self.execution_id,
+                    authenticated_consumer=CONSUMER,
+                    endpoint_symbol="TON-USDT",
+                )
+
+        self.assertEqual(status["state"], "RECEIVED")
+        enqueue.assert_not_called()
+
+    def test_recover_orphan_reenqueues_received_without_unsafe_evidence(self):
+        self.create_execution()
+        self.set_execution_fields(state_updated_at="2026-01-01T00:00:00.000000Z")
+        store = self.store_module.PayoutExecutionStore
+
+        with self.app.app_context():
+            with patch.object(store, "enqueue_execution") as enqueue:
+                status = store.recover_orphan_execution(
+                    self.execution_id,
+                    authenticated_consumer=CONSUMER,
+                    endpoint_symbol="TON-USDT",
+                )
+
+        row = self.get_execution()
+        self.assertEqual(status["state"], "RECEIVED")
+        self.assertEqual(status["orphan_recovery"]["enqueued"], True)
+        self.assertEqual(row.state, "RECEIVED")
+        enqueue.assert_called_once_with(self.execution_id, row.payout_queue)
+
+    def test_recover_orphan_does_not_reenqueue_fresh_received(self):
+        self.create_execution()
+        store = self.store_module.PayoutExecutionStore
+
+        with self.app.app_context():
+            with patch.object(store, "enqueue_execution") as enqueue:
+                status = store.recover_orphan_execution(
+                    self.execution_id,
+                    authenticated_consumer=CONSUMER,
+                    endpoint_symbol="TON-USDT",
+                )
+
+        self.assertEqual(status["state"], "RECEIVED")
+        self.assertEqual(status["orphan_recovery"]["enqueued"], False)
+        self.assertEqual(status["orphan_recovery"]["reason"], "not_old_enough")
+        enqueue.assert_not_called()
+
+    def test_recover_orphan_does_not_reenqueue_active_lease(self):
+        self.create_execution()
+        self.set_execution_fields(
+            state="VALIDATED",
+            state_updated_at="2026-01-01T00:00:00.000000Z",
+            lease_owner="worker-active",
+            lease_expires_at="2999-01-01T00:00:00.000000Z",
+        )
+        store = self.store_module.PayoutExecutionStore
+
+        with self.app.app_context():
+            with patch.object(store, "enqueue_execution") as enqueue:
+                status = store.recover_orphan_execution(
+                    self.execution_id,
+                    authenticated_consumer=CONSUMER,
+                    endpoint_symbol="TON-USDT",
+                )
+
+        self.assertEqual(status["state"], "VALIDATED")
+        self.assertEqual(status["orphan_recovery"]["enqueued"], False)
+        self.assertEqual(status["orphan_recovery"]["reason"], "active_lease")
+        enqueue.assert_not_called()
+
+    def test_recover_orphan_does_not_reenqueue_when_unsafe_evidence_exists(self):
+        self.create_execution()
+        self.set_execution_fields(
+            state="SIGNING",
+            state_updated_at="2026-01-01T00:00:00.000000Z",
+            source_seqno=101,
+            message_hashes_json='["message-hash-present"]',
+            lease_owner=None,
+            lease_expires_at=None,
+        )
+        store = self.store_module.PayoutExecutionStore
+
+        with self.app.app_context():
+            with patch.object(store, "enqueue_execution") as enqueue:
+                status = store.recover_orphan_execution(
+                    self.execution_id,
+                    authenticated_consumer=CONSUMER,
+                    endpoint_symbol="TON-USDT",
+                )
+
+        self.assertEqual(status["state"], "RECONCILIATION_REQUIRED")
+        self.assertEqual(status["error_code"], "STALE_SIGNING_WITH_SIDE_EFFECT")
+        self.assertEqual(status["orphan_recovery"]["enqueued"], False)
+        self.assertEqual(status["orphan_recovery"]["reason"], "state_not_recoverable")
+        enqueue.assert_not_called()
+
+    def test_recover_orphan_reenqueues_stale_signing_without_unsafe_evidence(self):
+        self.create_execution()
+        self.set_execution_fields(
+            state="SIGNING",
+            state_updated_at="2026-01-01T00:00:00.000000Z",
+            lease_owner="worker-expired",
+            lease_expires_at="2026-01-01T00:01:00.000000Z",
+            attempt_id="attempt-1",
+        )
+        store = self.store_module.PayoutExecutionStore
+
+        with self.app.app_context():
+            with patch.object(store, "enqueue_execution") as enqueue:
+                status = store.recover_orphan_execution(
+                    self.execution_id,
+                    authenticated_consumer=CONSUMER,
+                    endpoint_symbol="TON-USDT",
+                )
+
+        row = self.get_execution()
+        self.assertEqual(status["state"], "RECEIVED")
+        self.assertEqual(status["orphan_recovery"]["enqueued"], True)
+        self.assertEqual(row.state, "RECEIVED")
+        self.assertIsNone(row.lease_owner)
+        self.assertIsNone(row.lease_expires_at)
+        self.assertIsNone(row.attempt_id)
+        enqueue.assert_called_once_with(self.execution_id, row.payout_queue)
+
+    def test_recover_orphan_does_not_reenqueue_when_message_hash_list_exists(self):
+        self.create_execution()
+        self.set_execution_fields(
+            state="RECEIVED",
+            state_updated_at="2026-01-01T00:00:00.000000Z",
+            message_hashes_json='["message-hash-present"]',
+        )
+        store = self.store_module.PayoutExecutionStore
+
+        with self.app.app_context():
+            with patch.object(store, "enqueue_execution") as enqueue:
+                status = store.recover_orphan_execution(
+                    self.execution_id,
+                    authenticated_consumer=CONSUMER,
+                    endpoint_symbol="TON-USDT",
+                )
+
+        self.assertEqual(status["state"], "RECEIVED")
+        self.assertEqual(status["orphan_recovery"]["enqueued"], False)
+        self.assertEqual(status["orphan_recovery"]["reason"], "unsafe_evidence_exists")
+        enqueue.assert_not_called()
+
 
 
 class TonPayoutCoinPrimitiveTests(unittest.TestCase):

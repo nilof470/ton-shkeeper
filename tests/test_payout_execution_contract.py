@@ -7,6 +7,7 @@ import os
 import time
 import unittest
 from urllib.parse import urlencode
+from unittest.mock import patch
 
 import prometheus_client
 
@@ -103,6 +104,7 @@ class TonPayoutExecutionContractTests(unittest.TestCase):
         config["TON_USDT_PAYOUT_QUEUE"] = "ton_usdt_payouts"
         config["PAYOUT_EXECUTION_PREFLIGHT_CHECKS_ENABLED"] = False
         config["PAYOUT_EXECUTION_AUTO_ENQUEUE_ENABLED"] = False
+        config["PAYOUT_EXECUTION_ORPHAN_RECOVERY_MIN_AGE_SEC"] = 60
         reset_modules()
 
         from app import create_app
@@ -162,6 +164,25 @@ class TonPayoutExecutionContractTests(unittest.TestCase):
             headers=headers,
             content_type="application/json",
         )
+
+    def submit_v1_execution(self, execution_id):
+        response = self.post_json(
+            f"/TON-USDT/payout-executions/{execution_id}",
+            payload(execution_id=execution_id),
+            nonce=f"submit-{execution_id}",
+        )
+        self.assertEqual(response.status_code, 202)
+        return response.get_json()
+
+    def set_execution_fields(self, execution_id, **fields):
+        from app.models import PayoutExecution
+
+        with self.app.app_context():
+            row = PayoutExecution.query.filter_by(execution_id=execution_id).first()
+            self.assertIsNotNone(row)
+            for key, value in fields.items():
+                setattr(row, key, value)
+            self.db.session.commit()
 
     def test_preflight_accepts_signed_consumer_request(self):
         response = self.post_json("/TON-USDT/payout/preflight", payload())
@@ -452,6 +473,148 @@ class TonPayoutExecutionContractTests(unittest.TestCase):
         self.assertEqual(submit.status_code, 202)
         self.assertEqual(status.status_code, 200)
         self.assertEqual(status.get_json()["execution_id"], execution_id)
+
+
+    def test_recover_orphan_accepts_signed_request(self):
+        execution_id = "recover-orphan-old"
+        self.submit_v1_execution(execution_id)
+        self.set_execution_fields(
+            execution_id,
+            state_updated_at="2026-01-01T00:00:00.000000Z",
+        )
+        path = f"/TON-USDT/payout-executions/{execution_id}/recover-orphan"
+
+        with patch("app.payout_execution.PayoutExecutionStore.enqueue_execution") as enqueue:
+            response = self.post_json(path, {}, nonce="recover-old")
+
+        self.assertEqual(response.status_code, 202)
+        data = response.get_json()
+        self.assertEqual(data["state"], "RECEIVED")
+        self.assertEqual(
+            data["orphan_recovery"],
+            {"attempted": True, "enqueued": True, "reason": "enqueued"},
+        )
+        enqueue.assert_called_once_with(execution_id, "ton_usdt_payouts")
+
+    def test_recover_orphan_requires_payout_auth(self):
+        response = self.client.post(
+            "/TON-USDT/payout-executions/missing/recover-orphan",
+            data=canonical_json({}).encode("utf-8"),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.get_json()["code"], "PAYOUT_AUTH_MISSING")
+
+    def test_recover_orphan_unknown_execution_returns_signed_error_shape(self):
+        response = self.post_json(
+            "/TON-USDT/payout-executions/missing/recover-orphan",
+            {},
+            nonce="recover-missing",
+        )
+
+        self.assertEqual(response.status_code, 404)
+        data = response.get_json()
+        self.assertEqual(data["status"], "error")
+        self.assertEqual(data["code"], "NO_EXECUTION_CREATED")
+        self.assertIn("message", data)
+
+    def test_recover_orphan_fresh_execution_does_not_enqueue(self):
+        execution_id = "recover-orphan-fresh"
+        self.submit_v1_execution(execution_id)
+        path = f"/TON-USDT/payout-executions/{execution_id}/recover-orphan"
+
+        with patch("app.payout_execution.PayoutExecutionStore.enqueue_execution") as enqueue:
+            response = self.post_json(path, {}, nonce="recover-fresh")
+
+        self.assertEqual(response.status_code, 202)
+        data = response.get_json()
+        self.assertFalse(data["orphan_recovery"]["enqueued"])
+        self.assertEqual(data["orphan_recovery"]["reason"], "not_old_enough")
+        enqueue.assert_not_called()
+
+    def test_recover_orphan_active_lease_does_not_enqueue(self):
+        execution_id = "recover-orphan-lease"
+        self.submit_v1_execution(execution_id)
+        self.set_execution_fields(
+            execution_id,
+            state="VALIDATED",
+            state_updated_at="2026-01-01T00:00:00.000000Z",
+            lease_owner="worker-active",
+            lease_expires_at="2999-01-01T00:00:00.000000Z",
+        )
+        path = f"/TON-USDT/payout-executions/{execution_id}/recover-orphan"
+
+        with patch("app.payout_execution.PayoutExecutionStore.enqueue_execution") as enqueue:
+            response = self.post_json(path, {}, nonce="recover-active-lease")
+
+        self.assertEqual(response.status_code, 202)
+        data = response.get_json()
+        self.assertFalse(data["orphan_recovery"]["enqueued"])
+        self.assertEqual(data["orphan_recovery"]["reason"], "active_lease")
+        enqueue.assert_not_called()
+
+    def test_recover_orphan_unsafe_evidence_does_not_enqueue(self):
+        execution_id = "recover-orphan-unsafe"
+        self.submit_v1_execution(execution_id)
+        self.set_execution_fields(
+            execution_id,
+            state="RECEIVED",
+            state_updated_at="2026-01-01T00:00:00.000000Z",
+            message_hashes_json='["message-hash-present"]',
+        )
+        path = f"/TON-USDT/payout-executions/{execution_id}/recover-orphan"
+
+        with patch("app.payout_execution.PayoutExecutionStore.enqueue_execution") as enqueue:
+            response = self.post_json(path, {}, nonce="recover-unsafe")
+
+        self.assertEqual(response.status_code, 202)
+        data = response.get_json()
+        self.assertFalse(data["orphan_recovery"]["enqueued"])
+        self.assertEqual(data["orphan_recovery"]["reason"], "unsafe_evidence_exists")
+        enqueue.assert_not_called()
+
+    def test_recover_orphan_enqueue_failure_returns_http_error(self):
+        execution_id = "recover-orphan-enqueue-error"
+        self.submit_v1_execution(execution_id)
+        self.set_execution_fields(
+            execution_id,
+            state_updated_at="2026-01-01T00:00:00.000000Z",
+        )
+        path = f"/TON-USDT/payout-executions/{execution_id}/recover-orphan"
+
+        with patch(
+            "app.payout_execution.PayoutExecutionStore.enqueue_execution",
+            side_effect=RuntimeError("broker unavailable"),
+        ):
+            response = self.post_json(path, {}, nonce="recover-enqueue-error")
+
+        self.assertEqual(response.status_code, 503)
+        data = response.get_json()
+        self.assertEqual(data["status"], "error")
+        self.assertEqual(data["code"], "PAYOUT_EXECUTION_RECOVERY_ENQUEUE_FAILED")
+
+    def test_recover_orphan_rejects_non_ton_usdt_route(self):
+        from app.config import config
+
+        config["PAYOUT_CONSUMER_KEYS"][CONSUMER]["rails"] = ["TON-USDT", "TON"]
+        execution_id = "recover-orphan-wrong-rail"
+        self.submit_v1_execution(execution_id)
+        self.set_execution_fields(
+            execution_id,
+            state_updated_at="2026-01-01T00:00:00.000000Z",
+        )
+
+        with patch("app.payout_execution.PayoutExecutionStore.enqueue_execution") as enqueue:
+            response = self.post_json(
+                f"/TON/payout-executions/{execution_id}/recover-orphan",
+                {},
+                nonce="recover-wrong-rail",
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()["code"], "PAYOUT_RAIL_MISMATCH")
+        enqueue.assert_not_called()
 
     def test_v1_path_execution_id_mismatch_is_rejected(self):
         value = payload(execution_id="body-id")

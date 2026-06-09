@@ -100,6 +100,17 @@ def _status_response(execution_id):
         return _payout_error_response(exc, "status")
 
 
+def _recover_orphan_response(execution_id):
+    try:
+        return PayoutExecutionStore.recover_orphan_execution(
+            execution_id,
+            authenticated_consumer=g.payout_consumer,
+            endpoint_symbol=g.symbol,
+        ), 202
+    except PayoutExecutionError as exc:
+        return _payout_error_response(exc, "recover_orphan")
+
+
 @api.post("/payout/preflight")
 @payout_auth_required
 def payout_execution_preflight():
@@ -134,6 +145,12 @@ def payout_execution_v1_submit(execution_id):
 @payout_auth_required
 def payout_execution_v1_status(execution_id):
     return _status_response(execution_id)
+
+
+@api.post("/payout-executions/<execution_id>/recover-orphan")
+@payout_auth_required
+def payout_execution_v1_recover_orphan(execution_id):
+    return _recover_orphan_response(execution_id)
 
 
 @api.post('/calc-tx-fee/<decimal:amount>')

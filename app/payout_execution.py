@@ -7,7 +7,13 @@ import time
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import (
+    DBAPIError,
+    IntegrityError,
+    OperationalError,
+    PendingRollbackError,
+    SQLAlchemyError,
+)
 
 from .config import config
 from .models import PayoutExecution, db
@@ -76,6 +82,12 @@ def maybe_int(value):
         return int(value)
     except (TypeError, ValueError):
         return value
+
+
+def is_transient_db_error(exc):
+    if isinstance(exc, (OperationalError, PendingRollbackError)):
+        return True
+    return isinstance(exc, DBAPIError) and getattr(exc, "connection_invalidated", False)
 
 
 class PayoutExecutionStore:
@@ -207,7 +219,15 @@ class PayoutExecutionStore:
         return cls._get_row(row.execution_id)
 
     @staticmethod
-    def _has_unsafe_side_effect(row):
+    def _message_hashes(row):
+        try:
+            hashes = json.loads(row.message_hashes_json or "[]")
+        except (TypeError, ValueError):
+            return []
+        return hashes if isinstance(hashes, list) else []
+
+    @classmethod
+    def _has_unsafe_side_effect(cls, row):
         return any(
             [
                 row.source_seqno is not None,
@@ -215,6 +235,7 @@ class PayoutExecutionStore:
                 row.signed_boc_hash,
                 row.message_hash,
                 row.broadcast_attempted_at,
+                cls._message_hashes(row),
             ]
         )
 
@@ -224,6 +245,14 @@ class PayoutExecutionStore:
         if expires_at is None:
             return True
         return expires_at <= utc_now_naive()
+
+    @classmethod
+    def _orphan_recovery_old_enough(cls, row):
+        updated_at = parse_iso(row.state_updated_at)
+        if updated_at is None:
+            return False
+        min_age = int(config["PAYOUT_EXECUTION_ORPHAN_RECOVERY_MIN_AGE_SEC"])
+        return (utc_now_naive() - updated_at).total_seconds() >= min_age
 
     @classmethod
     def recover_stale_execution(cls, execution_id):
@@ -277,6 +306,86 @@ class PayoutExecutionStore:
     @classmethod
     def recover_stale_signing(cls, execution_id):
         return cls.recover_stale_execution(execution_id)
+
+    @classmethod
+    def recover_task_owned_transient_failure(cls, execution_id, *, lease_owner):
+        row = cls._get_row(execution_id)
+        if row is None:
+            return "raise"
+        if row.state in NO_DOWNGRADE_STATES:
+            return "raise"
+        if row.state in (STATE_RECEIVED, STATE_VALIDATED):
+            return "retry"
+        if (
+            row.state == STATE_SIGNING
+            and row.lease_owner == lease_owner
+            and not cls._has_unsafe_side_effect(row)
+        ):
+            cls._transition(
+                row,
+                STATE_RECEIVED,
+                lease_owner=None,
+                lease_expires_at=None,
+                attempt_id=None,
+                reconciliation_required=False,
+            )
+            return "retry"
+        return "raise"
+
+    @classmethod
+    def recover_orphan_execution(cls, execution_id, *, authenticated_consumer, endpoint_symbol):
+        if endpoint_symbol != "TON-USDT":
+            raise PayoutExecutionError(
+                "Payout request asset/network does not match TON-USDT endpoint",
+                code="PAYOUT_RAIL_MISMATCH",
+                status_code=400,
+            )
+        row = PayoutExecution.query.filter_by(
+            execution_id=str(execution_id),
+            consumer=authenticated_consumer,
+        ).first()
+        if row is None:
+            raise PayoutExecutionError(
+                "Payout execution was not created",
+                code="NO_EXECUTION_CREATED",
+                status_code=404,
+            )
+        recovered_stale_orphan = False
+        if (
+            row.state in UNSAFE_RECOVERY_STATES
+            and cls._lease_expired(row)
+            and cls._orphan_recovery_old_enough(row)
+        ):
+            try:
+                cls.recover_stale_execution(row.execution_id)
+            except PayoutExecutionError as exc:
+                if exc.code != "PAYOUT_EXECUTION_CAS_CONFLICT":
+                    raise
+            row = cls._get_row(row.execution_id)
+            recovered_stale_orphan = True
+        recovery = {"attempted": True, "enqueued": False, "reason": None}
+        if row.state not in (STATE_RECEIVED, STATE_VALIDATED):
+            recovery["reason"] = "state_not_recoverable"
+        elif cls._has_unsafe_side_effect(row):
+            recovery["reason"] = "unsafe_evidence_exists"
+        elif row.lease_owner and not cls._lease_expired(row):
+            recovery["reason"] = "active_lease"
+        elif not recovered_stale_orphan and not cls._orphan_recovery_old_enough(row):
+            recovery["reason"] = "not_old_enough"
+        else:
+            try:
+                cls.enqueue_execution(row.execution_id, row.payout_queue)
+            except Exception as exc:
+                raise PayoutExecutionError(
+                    "Payout execution orphan recovery enqueue failed",
+                    code="PAYOUT_EXECUTION_RECOVERY_ENQUEUE_FAILED",
+                    status_code=503,
+                ) from exc
+            recovery["enqueued"] = True
+            recovery["reason"] = "enqueued"
+        status = cls._row_to_status(row)
+        status["orphan_recovery"] = recovery
+        return status
 
     @classmethod
     def _mark_seqno_reserved(cls, row, *, masterchain_seqno, source_seqno, valid_until):
@@ -486,6 +595,10 @@ class PayoutExecutionStore:
                 raise
             row = cls._get_row(execution_id)
             return cls._row_to_status(row)
+        except SQLAlchemyError as exc:
+            if is_transient_db_error(exc):
+                raise
+            return cls._mark_failed_or_reconciliation(execution_id, exc)
         attempt_id = row.attempt_id
         if row.state not in (STATE_SIGNING, STATE_SIGNED, STATE_BROADCASTING):
             return cls._row_to_status(row)
@@ -538,6 +651,10 @@ class PayoutExecutionStore:
                 cls._verify_broadcast_result(row, result)
                 row = cls._mark_broadcasted(row, row.message_hash, result)
                 return cls._row_to_status(row)
+        except SQLAlchemyError as exc:
+            if is_transient_db_error(exc):
+                raise
+            return cls._mark_failed_or_reconciliation(execution_id, exc)
         except Exception as exc:
             return cls._mark_failed_or_reconciliation(execution_id, exc)
 
