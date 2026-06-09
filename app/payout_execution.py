@@ -354,12 +354,13 @@ class PayoutExecutionStore:
             return "raise"
         if row.state in NO_DOWNGRADE_STATES:
             return "raise"
+        if cls._has_unsafe_side_effect(row):
+            return "raise"
         if row.state in (STATE_RECEIVED, STATE_VALIDATED):
             return "retry"
         if (
             row.state == STATE_SIGNING
             and row.lease_owner == lease_owner
-            and not cls._has_unsafe_side_effect(row)
         ):
             cls._transition(
                 row,
@@ -395,6 +396,7 @@ class PayoutExecutionStore:
             row.state in UNSAFE_RECOVERY_STATES
             and cls._lease_expired(row)
             and cls._orphan_recovery_old_enough(row)
+            and not cls._has_unsafe_side_effect(row)
         ):
             try:
                 cls.recover_stale_execution(row.execution_id)
@@ -404,12 +406,12 @@ class PayoutExecutionStore:
             row = cls._get_row(row.execution_id)
             recovered_stale_orphan = True
         recovery = {"attempted": True, "enqueued": False, "reason": None}
-        if row.state not in (STATE_RECEIVED, STATE_VALIDATED):
-            recovery["reason"] = "state_not_recoverable"
-        elif cls._has_unsafe_side_effect(row):
+        if cls._has_unsafe_side_effect(row):
             recovery["reason"] = "unsafe_evidence_exists"
         elif row.lease_owner and not cls._lease_expired(row):
             recovery["reason"] = "active_lease"
+        elif row.state not in (STATE_RECEIVED, STATE_VALIDATED):
+            recovery["reason"] = "state_not_recoverable"
         elif not recovered_stale_orphan and not cls._orphan_recovery_old_enough(row):
             recovery["reason"] = "not_old_enough"
         else:

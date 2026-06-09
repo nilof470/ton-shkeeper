@@ -673,6 +673,21 @@ class TonPayoutExecutionBoundaryTests(unittest.TestCase):
         self.assertIsNone(row.attempt_id)
         self.assertFalse(row.reconciliation_required)
 
+    def test_task_owned_transient_failure_does_not_retry_received_with_hash_list(self):
+        self.create_execution()
+        self.set_execution_fields(message_hashes_json='["message-hash-present"]')
+
+        with self.app.app_context():
+            action = self.store_module.PayoutExecutionStore.recover_task_owned_transient_failure(
+                self.execution_id,
+                lease_owner="task-1",
+            )
+
+        row = self.get_execution()
+        self.assertEqual(action, "raise")
+        self.assertEqual(row.state, "RECEIVED")
+        self.assertEqual(row.message_hashes_json, '["message-hash-present"]')
+
     def test_task_owned_transient_failure_resets_signing_without_unsafe_evidence(self):
         self.create_execution()
         self.set_execution_fields(
@@ -834,11 +849,14 @@ class TonPayoutExecutionBoundaryTests(unittest.TestCase):
                     endpoint_symbol="TON-USDT",
                 )
 
-        self.assertEqual(status["state"], "RECONCILIATION_REQUIRED")
-        self.assertEqual(status["error_code"], "STALE_SIGNING_WITH_SIDE_EFFECT")
+        self.assertEqual(status["state"], "SIGNING")
         self.assertEqual(status["orphan_recovery"]["enqueued"], False)
-        self.assertEqual(status["orphan_recovery"]["reason"], "state_not_recoverable")
+        self.assertEqual(status["orphan_recovery"]["reason"], "unsafe_evidence_exists")
         enqueue.assert_not_called()
+        row = self.get_execution()
+        self.assertEqual(row.state, "SIGNING")
+        self.assertEqual(row.source_seqno, 101)
+        self.assertFalse(row.reconciliation_required)
 
     def test_recover_orphan_reenqueues_stale_signing_without_unsafe_evidence(self):
         self.create_execution()
