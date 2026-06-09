@@ -6,6 +6,7 @@ from contextlib import contextmanager
 import uuid
 
 from celery.utils.log import get_task_logger
+from sqlalchemy.exc import SQLAlchemyError
 
 from . import celery
 from .config import config, get_min_token_transfer_threshold
@@ -29,6 +30,81 @@ def ton_usdt_payout_seqno_lock():
         yield
 
 
+def _db_retry_countdown(retries):
+    return min(5 * (2 ** max(retries, 0)), 60)
+
+
+def _cleanup_db_session():
+    try:
+        db.session.rollback()
+    except Exception:
+        logger.warning("TON payout task db rollback failed", exc_info=True)
+    finally:
+        db.session.remove()
+
+
+def run_execute_payout_execution(task, execution_id):
+    from .payout_execution import (
+        PayoutExecutionError,
+        PayoutExecutionStore,
+        is_transient_db_error,
+    )
+
+    try:
+        db.session.rollback()
+    except Exception:
+        logger.warning("TON payout task initial db rollback failed", exc_info=True)
+
+    lease_owner = task.request.id
+    try:
+        PayoutExecutionStore.recover_task_owned_transient_failure(
+            execution_id,
+            lease_owner=lease_owner,
+        )
+    except PayoutExecutionError as exc:
+        if exc.code != "PAYOUT_EXECUTION_CAS_CONFLICT":
+            raise
+    except SQLAlchemyError as exc:
+        if not is_transient_db_error(exc):
+            raise
+        _cleanup_db_session()
+        raise task.retry(
+            exc=exc,
+            countdown=_db_retry_countdown(getattr(task.request, "retries", 0)),
+        )
+
+    try:
+        coin = Coin("TON-USDT")
+        return PayoutExecutionStore.execute(
+            execution_id,
+            coin=coin,
+            lock_factory=ton_usdt_payout_seqno_lock,
+            lease_owner=lease_owner,
+        )
+    except SQLAlchemyError as exc:
+        if not is_transient_db_error(exc):
+            raise
+        _cleanup_db_session()
+        try:
+            action = PayoutExecutionStore.recover_task_owned_transient_failure(
+                execution_id,
+                lease_owner=lease_owner,
+            )
+        except SQLAlchemyError as recovery_exc:
+            if not is_transient_db_error(recovery_exc):
+                raise
+            _cleanup_db_session()
+            action = "retry"
+        if action == "retry":
+            raise task.retry(
+                exc=exc,
+                countdown=_db_retry_countdown(getattr(task.request, "retries", 0)),
+            )
+        raise
+    finally:
+        db.session.remove()
+
+
 @celery.task()
 def make_multipayout(symbol, payout_list, fee):
     if symbol == config["COIN_SYMBOL"]:
@@ -45,17 +121,9 @@ def make_multipayout(symbol, payout_list, fee):
         return [{"status": "error", 'msg': "Symbol is not in config"}]
 
 
-@celery.task(bind=True)
+@celery.task(bind=True, max_retries=5)
 def execute_payout_execution(self, execution_id):
-    from .payout_execution import PayoutExecutionStore
-
-    coin = Coin("TON-USDT")
-    return PayoutExecutionStore.execute(
-        execution_id,
-        coin=coin,
-        lock_factory=ton_usdt_payout_seqno_lock,
-        lease_owner=self.request.id,
-    )
+    return run_execute_payout_execution(self, execution_id)
 
 
 def queue_payout_callback(data, symbol):

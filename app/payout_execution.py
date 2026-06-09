@@ -45,6 +45,20 @@ NO_DOWNGRADE_STATES = (
     STATE_FAILED_CHAIN_TERMINAL,
     STATE_RECONCILIATION_REQUIRED,
 )
+TRANSIENT_DBAPI_NUMERIC_CODES = {
+    1205,  # MySQL lock wait timeout
+    1213,  # MySQL deadlock
+    2006,  # MySQL server has gone away
+    2013,  # MySQL lost connection
+    2055,  # MySQL lost connection to server
+}
+TRANSIENT_DBAPI_SQLSTATES = {
+    "40001",  # serialization failure
+    "40P01",  # PostgreSQL deadlock
+    "57P01",  # PostgreSQL admin shutdown
+    "57P02",  # PostgreSQL crash shutdown
+    "57P03",  # PostgreSQL cannot connect now
+}
 
 
 class PayoutExecutionError(Exception):
@@ -84,10 +98,36 @@ def maybe_int(value):
         return value
 
 
+def _dbapi_error_codes(exc):
+    orig = getattr(exc, "orig", None)
+    if orig is None:
+        return []
+    codes = []
+    for attr in ("errno", "pgcode", "sqlstate"):
+        value = getattr(orig, attr, None)
+        if value is not None:
+            codes.append(value)
+    if getattr(orig, "args", None):
+        codes.append(orig.args[0])
+    return codes
+
+
 def is_transient_db_error(exc):
-    if isinstance(exc, (OperationalError, PendingRollbackError)):
+    if isinstance(exc, PendingRollbackError):
         return True
-    return isinstance(exc, DBAPIError) and getattr(exc, "connection_invalidated", False)
+    if isinstance(exc, DBAPIError) and bool(
+        getattr(exc, "connection_invalidated", False)
+    ):
+        return True
+    if not isinstance(exc, OperationalError):
+        return False
+    for code in _dbapi_error_codes(exc):
+        if code in TRANSIENT_DBAPI_NUMERIC_CODES:
+            return True
+        text_code = str(code)
+        if text_code in TRANSIENT_DBAPI_SQLSTATES or text_code.startswith("08"):
+            return True
+    return False
 
 
 class PayoutExecutionStore:

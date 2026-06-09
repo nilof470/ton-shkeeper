@@ -7,6 +7,8 @@ import time
 import unittest
 from unittest.mock import patch
 
+from sqlalchemy.exc import OperationalError
+
 from tests.test_payout_execution_contract import (
     CONSUMER,
     DESTINATION,
@@ -16,6 +18,10 @@ from tests.test_payout_execution_contract import (
     payload,
     reset_modules,
 )
+
+
+class DbapiErrorWithCode(Exception):
+    pass
 
 
 class FakeToncenter:
@@ -181,6 +187,24 @@ class TonPayoutExecutionBoundaryTests(unittest.TestCase):
         response = self.submit()
         self.execution_id = response["execution_id"]
         return response
+
+    def test_transient_db_error_classifier_accepts_known_disconnect_code(self):
+        exc = OperationalError(
+            "select 1",
+            {},
+            DbapiErrorWithCode(2006, "MySQL server has gone away"),
+        )
+
+        self.assertTrue(self.store_module.is_transient_db_error(exc))
+
+    def test_transient_db_error_classifier_rejects_generic_operational_error(self):
+        exc = OperationalError(
+            "select 1",
+            {},
+            DbapiErrorWithCode(1146, "table does not exist"),
+        )
+
+        self.assertFalse(self.store_module.is_transient_db_error(exc))
 
     def test_execute_persists_seqno_signed_boc_and_broadcast_markers(self):
         self.create_execution()
