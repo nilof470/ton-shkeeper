@@ -8,6 +8,7 @@ from .models import Settings, db
 from .config import config
 from .logging import logger
 from .coin import get_all_raw_accounts, get_pub_address_by_raw_address
+from .sweep_guard import is_sweep_allowed
 from .toncenterapi import Toncenterapi, ToncenterTransientError
 
 
@@ -68,6 +69,16 @@ def walletnotify_shkeeper(symbol, txid) -> bool:
             time.sleep(10)
 
 
+def enqueue_drain_if_sweep_allowed(symbol, address, txid, drain_task):
+    if is_sweep_allowed(symbol, address, txid=txid):
+        drain_task.delay(symbol, address, txid=txid)
+        return True
+    logger.warning(
+        f"TON drain not queued because sweep guard did not allow {symbol}/{address}/{txid}"
+    )
+    return False
+
+
 def log_loop(last_checked_block, check_interval):
     from .tasks import drain_account
     from app import create_app
@@ -99,12 +110,18 @@ def log_loop(last_checked_block, check_interval):
                             if message is None:
                                 continue
                             if message['source'] != '' and message['destination'] != '':
+                                txid = base64.b64decode(transaction['hash']).hex()
                                 if ((message['destination'] in list_accounts) or
                                     (message['source'] in list_accounts)):
-                                    walletnotify_shkeeper(config["COIN_SYMBOL"], base64.b64decode(transaction['hash']).hex())
+                                    walletnotify_shkeeper(config["COIN_SYMBOL"], txid)
                                 if ((message['destination'] in list_accounts and message['source'] not in list_accounts) and
                                     ((toncenterapi.get_masterchain_head() - block) < 400)):
-                                    drain_account.delay(config["COIN_SYMBOL"], message['destination'])
+                                    enqueue_drain_if_sweep_allowed(
+                                        config["COIN_SYMBOL"],
+                                        message['destination'],
+                                        txid,
+                                        drain_account,
+                                    )
                     except ToncenterTransientError as e:
                         result.native_ton = SCAN_TRANSIENT_FAILURE
                         result.native_error = str(e)
@@ -127,12 +144,18 @@ def log_loop(last_checked_block, check_interval):
                         for transaction in all_txs:
                             if ((transaction['destination'] in list_accounts) or 
                                 (transaction['source'] in list_accounts)):
-                                walletnotify_shkeeper(token,  base64.b64decode(transaction['transaction_hash']).hex())
+                                txid = base64.b64decode(transaction['transaction_hash']).hex()
+                                walletnotify_shkeeper(token, txid)
 
                                 if ((transaction['destination'] in list_accounts and 
                                      transaction['source'] not in list_accounts) and 
                                     ((toncenterapi.get_masterchain_head() - block) < 400)):
-                                    drain_account.delay(token, transaction['destination'])
+                                    enqueue_drain_if_sweep_allowed(
+                                        token,
+                                        transaction['destination'],
+                                        txid,
+                                        drain_account,
+                                    )
                 except ToncenterTransientError as e:
                     result.jettons = SCAN_TRANSIENT_FAILURE
                     result.jetton_error = str(e)

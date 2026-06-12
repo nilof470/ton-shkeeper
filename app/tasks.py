@@ -19,6 +19,7 @@ from .payout_callback_outbox import (
     dispatch_payout_callback,
     should_retry,
 )
+from .sweep_guard import is_sweep_allowed
 from .utils import skip_if_running
 
 logger = get_task_logger(__name__)
@@ -219,10 +220,20 @@ def refresh_balances():
                         have_tokens = copy.deepcopy(token)
 
             if have_tokens in config['TOKENS'][config["CURRENT_TON_NETWORK"]].keys():
-                drain_account.delay(have_tokens, account)
+                if is_sweep_allowed(have_tokens, account):
+                    drain_account.delay(have_tokens, account)
+                else:
+                    logger.warning(
+                        f"TON periodic drain not queued because sweep guard did not allow {have_tokens}/{account}"
+                    )
             else:
                 if acc_balance >= decimal.Decimal(config['MIN_TRANSFER_THRESHOLD']):
-                    drain_account.delay(config["COIN_SYMBOL"], account)
+                    if is_sweep_allowed(config["COIN_SYMBOL"], account):
+                        drain_account.delay(config["COIN_SYMBOL"], account)
+                    else:
+                        logger.warning(
+                            f"TON periodic drain not queued because sweep guard did not allow {config['COIN_SYMBOL']}/{account}"
+                        )
 
             updated = updated + 1
 
@@ -244,9 +255,14 @@ def refresh_balances():
 
 @celery.task(bind=True)
 @skip_if_running
-def drain_account(self, symbol, account):
+def drain_account(self, symbol, account, txid=None):
     logger.warning(f"Start draining from account {account} crypto {symbol}")
     # return False
+    if not is_sweep_allowed(symbol, account, txid=txid):
+        logger.warning(
+            f"TON drain stopped before fee-wallet action because sweep guard did not allow {symbol}/{account}/{txid}"
+        )
+        return False
     if symbol == config["COIN_SYMBOL"]:
         inst = Coin(symbol)
         destination = inst.get_fee_deposit_account('public')

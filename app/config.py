@@ -47,6 +47,7 @@ config = {
     'API_PASSWORD': os.environ.get('TON_PASSWORD', 'shkeeper'),
     'SHKEEPER_KEY': os.environ.get('SHKEEPER_BACKEND_KEY', 'shkeeper'),
     'SHKEEPER_HOST': os.environ.get('SHKEEPER_HOST', 'shkeeper:5000'),
+    'AML_SWEEP_GATE_TIMEOUT_SEC': float(os.environ.get('AML_SWEEP_GATE_TIMEOUT_SEC', '5')),
     'REDIS_HOST': os.environ.get('REDIS_HOST', 'localhost'),
     'TON_HOST': os.environ.get('TON_HOST', 'ton'),
     'MIN_TRANSFER_THRESHOLD': Decimal(os.environ.get('MIN_TRANSFER_THRESHOLD', '0.2')),

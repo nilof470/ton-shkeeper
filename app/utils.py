@@ -19,15 +19,27 @@ class DecimalConverter(BaseConverter):
 def skip_if_running(f):
     task_name = f'{f.__module__}.{f.__name__}'
 
+    def dedupe_key(args, kwargs):
+        normalized_args = tuple(args)
+        normalized_kwargs = dict(kwargs)
+        if task_name.endswith(".drain_account"):
+            normalized_args = normalized_args[:2]
+            normalized_kwargs.pop("txid", None)
+        return normalized_args, normalized_kwargs
+
     @wraps(f)
     def wrapped(self, *args, **kwargs):
         workers = self.app.control.inspect().active()
+        current_args, current_kwargs = dedupe_key(args, kwargs)
 
         for worker, tasks in workers.items():
             for task in tasks:
+                task_args, task_kwargs = dedupe_key(
+                    tuple(task['args']), task['kwargs']
+                )
                 if (task_name == task['name'] and
-                        tuple(args) == tuple(task['args']) and
-                        kwargs == task['kwargs'] and
+                        current_args == task_args and
+                        current_kwargs == task_kwargs and
                         self.request.id != task['id']):
                     logger.debug(f'task {task_name} ({args}, {kwargs}) is running on {worker}, skipping')
 
